@@ -329,12 +329,99 @@ def summarise_findings(domain: str) -> None:
     else:
         print("  No immediate recommendations; configuration appears robust.")
 
+    # Return summary text so it can be sent elsewhere if needed
+    # Assemble a multi‑line report text
+    report_lines = []
+    report_lines.append(f"=== Risk Management Report for {domain} ===")
+    report_lines.append(f"Generated: {datetime.utcnow().isoformat()}Z")
+    report_lines.append("")
+    report_lines.append(f"Found {len(subdomains)} subdomains via crt.sh:")
+    for sd in subdomains[:20]:
+        report_lines.append(f"  - {sd}")
+    if len(subdomains) > 20:
+        report_lines.append("  ... (additional subdomains omitted)")
+    report_lines.append("")
+    # DNS records summary
+    for rtype in record_types:
+        records = get_dns_google(domain, rtype)
+        if records:
+            report_lines.append(f"{rtype} records:")
+            for rec in records:
+                report_lines.append(f"  {rec.get('data')}")
+    report_lines.append("")
+    report_lines.append("Email authentication:")
+    report_lines.append(f"  SPF:   {spf or 'not found'}")
+    report_lines.append(f"  DMARC: {dmarc or 'not found'}")
+    if dkim_keys:
+        for key in dkim_keys:
+            report_lines.append(f"  DKIM:  {key}")
+    else:
+        report_lines.append("  DKIM:  no keys found in common selectors")
+    report_lines.append("")
+    report_lines.append("HTTP security headers:")
+    for header, present in headers_presence.items():
+        report_lines.append(f"  {header}: {'present' if present else 'missing'}")
+    report_lines.append("")
+    if cert_info:
+        report_lines.append("TLS certificate:")
+        report_lines.append(f"  Subject: {cert_info['subject']}")
+        report_lines.append(f"  Issuer:  {cert_info['issuer']}")
+        report_lines.append(f"  Valid from {cert_info['not_before']} to {cert_info['not_after']}")
+    else:
+        report_lines.append("TLS certificate: Unable to retrieve certificate details.")
+    report_lines.append("")
+    report_lines.append("Recommendations:")
+    if recs:
+        for rec in recs:
+            report_lines.append(f"  - {rec}")
+    else:
+        report_lines.append("  No immediate recommendations; configuration appears robust.")
+    # Join the report for return
+    global last_report_text  # store globally for webhook dispatch
+    last_report_text = "\n".join(report_lines)
+
+
+def send_to_discord(webhook_url: str, report_text: str) -> None:
+    """Send the generated report to a Discord channel via webhook.
+
+    Discord webhooks accept a JSON payload with a `content` field.  The
+    message length should be kept within Discord's 2000 character limit; this
+    function truncates overly long messages.
+
+    Args:
+        webhook_url: The Discord webhook URL provided by the user.
+        report_text: The text content to send.
+    Raises:
+        Exception: If the POST request fails.
+    """
+    # Discord messages have a hard limit of 2000 characters.  Truncate
+    # with ellipsis if necessary.
+    max_length = 2000
+    content = report_text
+    if len(content) > max_length:
+        content = content[:max_length - 3] + "..."
+    payload = {"content": content}
+    resp = requests.post(webhook_url, json=payload, timeout=10)
+    resp.raise_for_status()
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Autonomous Web‑Presence Risk Management Agent")
     parser.add_argument("domain", help="Target domain to analyze (e.g., example.com)")
+    parser.add_argument(
+        "--webhook",
+        dest="webhook_url",
+        help="Discord webhook URL to send the report to (optional)",
+    )
     args = parser.parse_args()
     summarise_findings(args.domain)
+    # If a Discord webhook URL is provided, send the report
+    if args.webhook_url:
+        try:
+            send_to_discord(args.webhook_url, last_report_text)
+            print("\nReport sent to Discord webhook.")
+        except Exception as e:
+            print(f"[*] Failed to send report to Discord: {e}")
 
 
 if __name__ == "__main__":
